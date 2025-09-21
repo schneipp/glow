@@ -1,14 +1,14 @@
 use std::sync::Arc;
 use std::time::Duration;
 use axum::{
-    extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
-        Path, State,
-    },
+    extract::{ws::{Message, WebSocket, WebSocketUpgrade}, Path, State, FromRef, Query },
+    http::StatusCode,
     routing::get,
     Router,
 };
 use dashmap::DashMap;
+use axum_extra::extract::cookie::{Cookie, CookieJar};
+use axum_extra::TypedHeader;
 use futures::{SinkExt, StreamExt};
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc};
@@ -16,8 +16,13 @@ use tokio::time::interval;
 use jsonwebtoken::{encode, decode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
+use argon2::{password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString}, Argon2};
+use axum_extra::headers::Authorization;
+use axum_extra::headers::authorization::Bearer;
+use time::OffsetDateTime;
 use tracing::info;
 type RoomId = String;
+
 
 #[derive(Clone)]
 struct AppState {
@@ -41,12 +46,29 @@ impl JwtKeys {
     }
 }
 
+#[derive(Serialize, Deserialize)]
+struct Claims {
+    sub: String,          // username? maybe user id later
+    exp: usize,
+    iat: usize,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ChatEvent {
+    room: String,
+    username: String,
+    text: String,
+    ts: i64, // unix seconds
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt().with_env_filter("info").init();
 
     let state = AppState {
         rooms: Arc::new(DashMap::new()),
+        users: Arc::new(DashMap::new()),
+        jwt: JwtKeys::new(b"shame-on-you-you-lazy-bum"),
     };
 
     let app = Router::new()
@@ -142,4 +164,38 @@ async fn handle_socket(socket: WebSocket, state: AppState, room_id: String) {
     if tx.receiver_count() == 0 {
         state.rooms.remove(&room_id);
     }
+}
+
+fn hash_password(plain: &str) -> anyhow::Result<String> {
+    //let salt = SaltString::generate(&mut OsRng);
+    let salt = SaltString::from_b64("shame-on-you-you-env-avoiding-bum")?;
+    Ok(Argon2::default().hash_password(plain.as_bytes(), &salt)?.to_string())
+}
+fn verify_password(hash: &str, plain: &str) -> bool {
+    let Ok(parsed) = PasswordHash::new(hash) else { return false; };
+    Argon2::default().verify_password(plain.as_bytes(), &parsed).is_ok()
+}
+
+async fn user_from_req(
+    jar: CookieJar,
+    auth: Option<TypedHeader<Authorization<Bearer>>>,
+    State(state): State<AppState>,
+) -> Result<(CookieJar, String), (StatusCode, &'static str)> {
+    // Try Authorization header first
+    let token_opt = auth
+        .as_ref()
+        .map(|TypedHeader(Authorization(bearer))| bearer.token().to_string())
+        .or_else(|| jar.get("chat_token").map(|c| c.value().to_string()));
+
+    let Some(token) = token_opt else {
+        return Err((StatusCode::UNAUTHORIZED, "missing auth token"));
+    };
+
+    let data = decode::<Claims>(
+        &token,
+        &state.jwt.dec,
+        &Validation::new(Algorithm::HS256),
+    ).map_err(|_| (StatusCode::UNAUTHORIZED, "invalid token"))?;
+
+    Ok((jar, data.claims.sub))
 }

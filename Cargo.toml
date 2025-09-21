@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 tokio = { version = "1.47", features = ["rt-multi-thread", "macros", "sync", "time"] }
-axum = { version = "0.8", features = ["ws"] }
+axum = { version = "0.8", features = ["ws", "macros"] }
 dashmap = "6"
 futures = "0.3"
 tracing = "0.1"
@@ -13,3 +13,7 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 rand_core = "0.9.3"
 serde = { version = "1.0.226", features = ["derive"] }
 jsonwebtoken = "9.3.1"
+anyhow = "1.0.100"
+time = "0.3.44"
+argon2 = "0.6.0-rc.1"
+axum-extra = { version = "0.10.1", features = ["cookie","typed-header"] }
