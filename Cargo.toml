@@ -10,10 +10,16 @@ dashmap = "6"
 futures = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
-rand_core = "0.9.3"
 serde = { version = "1.0.226", features = ["derive"] }
 jsonwebtoken = "9.3.1"
 anyhow = "1.0.100"
 time = "0.3.44"
-argon2 = "0.6.0-rc.1"
+# Do NOT depend on password-hash 0.6-rc directly.
+# (Optionally pin password-hash explicitly to ensure no RC sneaks in)
 axum-extra = { version = "0.10.1", features = ["cookie","typed-header"] }
+serde_json = "1.0.145"
+argon2 = { version = "0.5.3", features = ["std"] }
+# Do NOT depend on password-hash 0.6-rc directly.
+# (Optionally pin password-hash explicitly to ensure no RC sneaks in)
+password-hash = "0.5.0"
+rand_core = "0.6"

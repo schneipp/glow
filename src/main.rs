@@ -1,26 +1,28 @@
+
 use argon2::{
     Argon2,
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
 };
-use axum::{
-    Router,
-    extract::{
-        Path, State,
-        ws::{Message, WebSocket, WebSocketUpgrade},
-    },
-    http::StatusCode,
-    routing::get,
-};
+use rand_core::OsRng;
+
+use axum::{Router, extract::{
+    Path, State,
+    ws::{Message, WebSocket, WebSocketUpgrade},
+}, http::StatusCode, routing::get, Json};
 use axum_extra::TypedHeader;
-use axum_extra::extract::cookie::CookieJar;
+use axum_extra::extract::cookie::{Cookie, CookieJar};
 use axum_extra::headers::Authorization;
 use axum_extra::headers::authorization::Bearer;
 use dashmap::DashMap;
 use futures::{SinkExt, StreamExt};
-use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Validation, decode};
+use jsonwebtoken::{encode, decode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
+
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
+use axum::response::IntoResponse;
+use axum::routing::post;
+use time::OffsetDateTime;
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc};
 use tokio::time::interval;
@@ -70,29 +72,39 @@ async fn main() {
     let state = AppState {
         rooms: Arc::new(DashMap::new()),
         users: Arc::new(DashMap::new()),
-        jwt: JwtKeys::new(b"shame-on-you-you-lazy-bum"),
+        jwt: JwtKeys::new(b"dev-secret-change-me"), // TODO: ENV in prod
     };
 
     let app = Router::new()
+        .route("/api/register", post(register))
+        .route("/api/login", post(login))
+        .route("/api/channels", get(list_channels))
         .route("/ws/{room_id}", get(ws_handler))
         .with_state(state);
 
     let listener = TcpListener::bind("0.0.0.0:3000").await.unwrap();
-    axum::serve(listener, app.into_make_service())
-        .await
-        .unwrap();
+    axum::serve(listener, app.into_make_service()).await.unwrap();
 }
+
+
 
 async fn ws_handler(
     State(state): State<AppState>,
     Path(room_id): Path<String>,
+    jar: CookieJar,
+    auth: Option<TypedHeader<Authorization<Bearer>>>,
     ws: WebSocketUpgrade,
 ) -> impl axum::response::IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, state, room_id))
-}
+    // authenticate before upgrading
+    let Ok((_jar, username)) = user_from_req(jar, auth, State(state.clone())).await else {
+        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    };
 
-async fn handle_socket(socket: WebSocket, state: AppState, room_id: String) {
+    ws.on_upgrade(move |socket| handle_socket(socket, state, room_id, username))
+}
+async fn handle_socket(socket: WebSocket, state: AppState, room_id: String, username: String) {
     // get or create the room broadcaster
+    let room_id_clone = room_id.clone();
     let tx = state
         .rooms
         .entry(room_id.clone())
@@ -149,9 +161,22 @@ async fn handle_socket(socket: WebSocket, state: AppState, room_id: String) {
             while let Some(Ok(msg)) = ws_receiver.next().await {
                 match msg {
                     Message::Text(text_bytes) => {
+                        let ev = ChatEvent {
+                            room: room_id.clone(),
+                            username: username.clone(),
+                            text: text_bytes.to_string(),
+                            ts: OffsetDateTime::now_utc().unix_timestamp(),
+                    };
+                        let json = serde_json::to_string(&ev).unwrap();
+                        let _ = tx.send(json);
+                }
+                /*
+                    Message::Text(text_bytes) => {
                         let text: String = text_bytes.as_str().into();
                         let _ = tx.send(text); // fan out to the room
                     }
+
+                 */
                     Message::Ping(p) => {
                         // enqueue Pong via the outbound queue (so we don't need the sink here)
                         let _ = out_tx.send(Message::Pong(p)).await;
@@ -167,17 +192,19 @@ async fn handle_socket(socket: WebSocket, state: AppState, room_id: String) {
 
     // cleanup: remove empty room
     if tx.receiver_count() == 0 {
-        state.rooms.remove(&room_id);
+        state.rooms.remove(&room_id_clone);
     }
 }
 
+
 fn hash_password(plain: &str) -> anyhow::Result<String> {
-    //let salt = SaltString::generate(&mut OsRng);
-    let salt = SaltString::from_b64("shame-on-you-you-env-avoiding-bum")?;
-    Ok(Argon2::default()
+    let salt = SaltString::generate(&mut OsRng); // 0.5 API
+    let hash = Argon2::default()
         .hash_password(plain.as_bytes(), &salt)?
-        .to_string())
+        .to_string();
+    Ok(hash)
 }
+
 fn verify_password(hash: &str, plain: &str) -> bool {
     let Ok(parsed) = PasswordHash::new(hash) else {
         return false;
@@ -206,4 +233,67 @@ async fn user_from_req(
         .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid token"))?;
 
     Ok((jar, data.claims.sub))
+}
+
+#[derive(Deserialize)]
+struct AuthReq { username: String, password: String }
+#[derive(Serialize)]
+struct LoginRes { token: String }
+
+async fn register(
+    State(state): State<AppState>,
+    Json(req): Json<AuthReq>,
+) -> Result<StatusCode, (StatusCode, &'static str)> {
+    if req.username.trim().is_empty() || req.password.len() < 6 {
+        return Err((StatusCode::BAD_REQUEST, "invalid username or password"));
+    }
+    if state.users.contains_key(&req.username) {
+        return Err((StatusCode::CONFLICT, "user exists"));
+    }
+    let hash = hash_password(&req.password).map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "hash error"))?;
+    state.users.insert(req.username, hash);
+    Ok(StatusCode::CREATED)
+}
+
+async fn login(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Json(req): Json<AuthReq>,
+) -> Result<(CookieJar, Json<LoginRes>), (StatusCode, &'static str)> {
+    let Some(stored) = state.users.get(&req.username) else {
+        return Err((StatusCode::UNAUTHORIZED, "invalid credentials"));
+    };
+    if !verify_password(&stored, &req.password) {
+        return Err((StatusCode::UNAUTHORIZED, "invalid credentials"));
+    }
+
+    let now = OffsetDateTime::now_utc().unix_timestamp() as usize;
+    let exp = now + 60 * 60 * 24 * 7; // 7 days
+    let claims = Claims { sub: req.username.clone(), iat: now, exp };
+    let token = encode(&Header::new(Algorithm::HS256), &claims, &state.jwt.enc)
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "token error"))?;
+
+    let cookie = Cookie::build(("chat_token", token.clone()))
+        .http_only(true)
+        .path("/")
+        .max_age(time::Duration::days(7))
+        .build();
+
+    Ok((jar.add(cookie), Json(LoginRes { token })))
+}
+
+#[derive(Serialize)]
+struct ChannelsRes { channels: Vec<String> }
+
+async fn list_channels(
+    jar: CookieJar,
+    auth: Option<TypedHeader<Authorization<Bearer>>>,
+    State(state): State<AppState>,
+) -> Result<Json<ChannelsRes>, (StatusCode, &'static str)> {
+    // authenticate (reuses your helper)
+    let (_jar, _username) = user_from_req(jar, auth, State(state.clone())).await?;
+
+    // list channels
+    let chans: Vec<String> = state.rooms.iter().map(|e| e.key().clone()).collect();
+    Ok(Json(ChannelsRes { channels: chans }))
 }
