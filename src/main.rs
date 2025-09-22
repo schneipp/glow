@@ -1,27 +1,31 @@
-
 use argon2::{
     Argon2,
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
 };
 use rand_core::OsRng;
 
-use axum::{Router, extract::{
-    Path, State,
-    ws::{Message, WebSocket, WebSocketUpgrade},
-}, http::StatusCode, routing::get, Json};
+use axum::{
+    Json, Router,
+    extract::{
+        Path, State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
+    },
+    http::StatusCode,
+    routing::get,
+};
 use axum_extra::TypedHeader;
 use axum_extra::extract::cookie::{Cookie, CookieJar};
 use axum_extra::headers::Authorization;
 use axum_extra::headers::authorization::Bearer;
 use dashmap::DashMap;
 use futures::{SinkExt, StreamExt};
-use jsonwebtoken::{encode, decode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
+use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
 
+use axum::response::IntoResponse;
+use axum::routing::post;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
-use axum::response::IntoResponse;
-use axum::routing::post;
 use time::OffsetDateTime;
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc};
@@ -83,10 +87,13 @@ async fn main() {
         .with_state(state);
 
     let listener = TcpListener::bind("0.0.0.0:3000").await.unwrap();
-    axum::serve(listener, app.into_make_service()).await.unwrap();
+
+    print_banner();
+
+    axum::serve(listener, app.into_make_service())
+        .await
+        .unwrap();
 }
-
-
 
 async fn ws_handler(
     State(state): State<AppState>,
@@ -121,20 +128,23 @@ async fn handle_socket(socket: WebSocket, state: AppState, room_id: String, user
         let mut tick = interval(Duration::from_secs(20));
         loop {
             tick.tick().await;
-            // empty payload ping is fine
+            // empty payload ping is fine, but 69 is what i define in the GLOW RFC TRUST ME BRO
             if heartbeat_tx
                 .send(Message::Ping(vec![69].into()))
                 .await
                 .is_err()
             {
-                break; // socket gone
+                break; // socket gone, please die 
             }
         }
     });
-    // split socket
+    // split socket, sorcerer style
+    // we need to split the socket so we can send and receive at the same time
     let (mut ws_sender, mut ws_receiver) = socket.split();
 
     // task: forward room broadcasts and anything in out_rx -> this socket
+    // if either channel closes, we close the socket
+    // if sending to the socket fails, we close the socket
     let send_task = tokio::spawn(async move {
         loop {
             tokio::select! {
@@ -166,17 +176,17 @@ async fn handle_socket(socket: WebSocket, state: AppState, room_id: String, user
                             username: username.clone(),
                             text: text_bytes.to_string(),
                             ts: OffsetDateTime::now_utc().unix_timestamp(),
-                    };
+                        };
                         let json = serde_json::to_string(&ev).unwrap();
                         let _ = tx.send(json);
-                }
-                /*
-                    Message::Text(text_bytes) => {
-                        let text: String = text_bytes.as_str().into();
-                        let _ = tx.send(text); // fan out to the room
                     }
+                    /*
+                       Message::Text(text_bytes) => {
+                           let text: String = text_bytes.as_str().into();
+                           let _ = tx.send(text); // fan out to the room
+                       }
 
-                 */
+                    */
                     Message::Ping(p) => {
                         // enqueue Pong via the outbound queue (so we don't need the sink here)
                         let _ = out_tx.send(Message::Pong(p)).await;
@@ -195,7 +205,6 @@ async fn handle_socket(socket: WebSocket, state: AppState, room_id: String, user
         state.rooms.remove(&room_id_clone);
     }
 }
-
 
 fn hash_password(plain: &str) -> anyhow::Result<String> {
     let salt = SaltString::generate(&mut OsRng); // 0.5 API
@@ -236,9 +245,14 @@ async fn user_from_req(
 }
 
 #[derive(Deserialize)]
-struct AuthReq { username: String, password: String }
+struct AuthReq {
+    username: String,
+    password: String,
+}
 #[derive(Serialize)]
-struct LoginRes { token: String }
+struct LoginRes {
+    token: String,
+}
 
 async fn register(
     State(state): State<AppState>,
@@ -250,7 +264,8 @@ async fn register(
     if state.users.contains_key(&req.username) {
         return Err((StatusCode::CONFLICT, "user exists"));
     }
-    let hash = hash_password(&req.password).map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "hash error"))?;
+    let hash = hash_password(&req.password)
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "hash error"))?;
     state.users.insert(req.username, hash);
     Ok(StatusCode::CREATED)
 }
@@ -269,7 +284,11 @@ async fn login(
 
     let now = OffsetDateTime::now_utc().unix_timestamp() as usize;
     let exp = now + 60 * 60 * 24 * 7; // 7 days
-    let claims = Claims { sub: req.username.clone(), iat: now, exp };
+    let claims = Claims {
+        sub: req.username.clone(),
+        iat: now,
+        exp,
+    };
     let token = encode(&Header::new(Algorithm::HS256), &claims, &state.jwt.enc)
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "token error"))?;
 
@@ -283,7 +302,9 @@ async fn login(
 }
 
 #[derive(Serialize)]
-struct ChannelsRes { channels: Vec<String> }
+struct ChannelsRes {
+    channels: Vec<String>,
+}
 
 async fn list_channels(
     jar: CookieJar,
@@ -296,4 +317,16 @@ async fn list_channels(
     // list channels
     let chans: Vec<String> = state.rooms.iter().map(|e| e.key().clone()).collect();
     Ok(Json(ChannelsRes { channels: chans }))
+}
+
+
+fn print_banner() {
+    println!("  ██████╗ ██╗      ██████╗ ██╗    ██╗");
+    println!(" ██╔════╝ ██║     ██╔═══██╗██║    ██║");
+    println!(" ██║  ███╗██║     ██║   ██║██║ █╗ ██║");
+    println!(" ██║   ██║██║     ██║   ██║██║███╗██║");
+    println!(" ╚██████╔╝███████╗╚██████╔╝╚███╔███╔╝");
+    println!("  ╚═════╝ ╚══════╝ ╚═════╝  ╚══╝╚══╝ ");
+    println!("   ..i am going to build my own chat server");
+    println!("       WITH BEER POT AND HOOKERS");
 }
