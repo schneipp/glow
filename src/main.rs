@@ -1,28 +1,33 @@
-use std::sync::Arc;
-use std::time::Duration;
+use argon2::{
+    Argon2,
+    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
+};
 use axum::{
-    extract::{ws::{Message, WebSocket, WebSocketUpgrade}, Path, State, FromRef, Query },
+    Router,
+    extract::{
+        FromRef, Path, Query, State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
+    },
     http::StatusCode,
     routing::get,
-    Router,
 };
-use dashmap::DashMap;
-use axum_extra::extract::cookie::{Cookie, CookieJar};
 use axum_extra::TypedHeader;
+use axum_extra::extract::cookie::{Cookie, CookieJar};
+use axum_extra::headers::Authorization;
+use axum_extra::headers::authorization::Bearer;
+use dashmap::DashMap;
 use futures::{SinkExt, StreamExt};
+use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
+use rand_core::OsRng;
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use std::time::Duration;
+use time::OffsetDateTime;
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc};
 use tokio::time::interval;
-use jsonwebtoken::{encode, decode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
-use rand_core::OsRng;
-use serde::{Deserialize, Serialize};
-use argon2::{password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString}, Argon2};
-use axum_extra::headers::Authorization;
-use axum_extra::headers::authorization::Bearer;
-use time::OffsetDateTime;
 use tracing::info;
 type RoomId = String;
-
 
 #[derive(Clone)]
 struct AppState {
@@ -48,7 +53,7 @@ impl JwtKeys {
 
 #[derive(Serialize, Deserialize)]
 struct Claims {
-    sub: String,          // username? maybe user id later
+    sub: String, // username? maybe user id later
     exp: usize,
     iat: usize,
 }
@@ -102,14 +107,17 @@ async fn handle_socket(socket: WebSocket, state: AppState, room_id: String) {
 
     // outbound queue: anything the recv task (or others) want to send to this socket
     let (out_tx, mut out_rx) = mpsc::channel::<Message>(256);
-    // inside handle_socket, after creating `out_tx`
     let heartbeat_tx = out_tx.clone();
     let ping_task = tokio::spawn(async move {
         let mut tick = interval(Duration::from_secs(20));
         loop {
             tick.tick().await;
             // empty payload ping is fine
-            if heartbeat_tx.send(Message::Ping(vec![69].into())).await.is_err() {
+            if heartbeat_tx
+                .send(Message::Ping(vec![69].into()))
+                .await
+                .is_err()
+            {
                 break; // socket gone
             }
         }
@@ -169,11 +177,17 @@ async fn handle_socket(socket: WebSocket, state: AppState, room_id: String) {
 fn hash_password(plain: &str) -> anyhow::Result<String> {
     //let salt = SaltString::generate(&mut OsRng);
     let salt = SaltString::from_b64("shame-on-you-you-env-avoiding-bum")?;
-    Ok(Argon2::default().hash_password(plain.as_bytes(), &salt)?.to_string())
+    Ok(Argon2::default()
+        .hash_password(plain.as_bytes(), &salt)?
+        .to_string())
 }
 fn verify_password(hash: &str, plain: &str) -> bool {
-    let Ok(parsed) = PasswordHash::new(hash) else { return false; };
-    Argon2::default().verify_password(plain.as_bytes(), &parsed).is_ok()
+    let Ok(parsed) = PasswordHash::new(hash) else {
+        return false;
+    };
+    Argon2::default()
+        .verify_password(plain.as_bytes(), &parsed)
+        .is_ok()
 }
 
 async fn user_from_req(
@@ -191,11 +205,8 @@ async fn user_from_req(
         return Err((StatusCode::UNAUTHORIZED, "missing auth token"));
     };
 
-    let data = decode::<Claims>(
-        &token,
-        &state.jwt.dec,
-        &Validation::new(Algorithm::HS256),
-    ).map_err(|_| (StatusCode::UNAUTHORIZED, "invalid token"))?;
+    let data = decode::<Claims>(&token, &state.jwt.dec, &Validation::new(Algorithm::HS256))
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid token"))?;
 
     Ok((jar, data.claims.sub))
 }
