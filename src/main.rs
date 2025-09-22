@@ -5,28 +5,25 @@ use argon2::{
 use axum::{
     Router,
     extract::{
-        FromRef, Path, Query, State,
+        Path, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::StatusCode,
     routing::get,
 };
 use axum_extra::TypedHeader;
-use axum_extra::extract::cookie::{Cookie, CookieJar};
+use axum_extra::extract::cookie::CookieJar;
 use axum_extra::headers::Authorization;
 use axum_extra::headers::authorization::Bearer;
 use dashmap::DashMap;
 use futures::{SinkExt, StreamExt};
-use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
-use rand_core::OsRng;
+use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Validation, decode};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
-use time::OffsetDateTime;
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc};
 use tokio::time::interval;
-use tracing::info;
 type RoomId = String;
 
 #[derive(Clone)]
