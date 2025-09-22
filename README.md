@@ -1,4 +1,4 @@
-# Glow Chat
+# Glow
 
 [![License](https://img.shields.io/badge/license-bsd-blue.svg)]()  [![Rust](https://img.shields.io/badge/lang-Rust-orange.svg)]()  [![PHP](https://img.shields.io/badge/lang-PHP-f0772b.svg)]()
 
