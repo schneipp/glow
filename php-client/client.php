@@ -8,7 +8,7 @@ use GuzzleHttp\Exception\ClientException;
 
 $baseUrl = "http://127.0.0.1:3000";
 $room     = $argv[1] ?? "general";
-$username = $argv[2] ?? "alice";
+$username = $argv[2] ?? "bro".time();
 $password = $argv[3] ?? "secret123";
 
 function loginOrRegister(Http $http, string $baseUrl, string $username, string $password): string {

@@ -11,6 +11,7 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::StatusCode,
+    response::Html,
     routing::get,
 };
 use axum_extra::TypedHeader;
@@ -84,6 +85,7 @@ async fn main() {
         .route("/api/login", post(login))
         .route("/api/channels", get(list_channels))
         .route("/ws/{room_id}", get(ws_handler))
+        .route("/chatfrontend", get(chatfrontend))
         .with_state(state);
 
     let listener = TcpListener::bind("0.0.0.0:3000").await.unwrap();
@@ -93,6 +95,10 @@ async fn main() {
     axum::serve(listener, app.into_make_service())
         .await
         .unwrap();
+}
+
+async fn chatfrontend() -> impl IntoResponse {
+    Html(include_str!("../htmx-frontend/index.html")).into_response()
 }
 
 async fn ws_handler(
